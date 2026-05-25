@@ -1,0 +1,39 @@
+services:
+  backend:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    container_name: brain-backend
+    env_file:
+      - ./backend/.env
+    environment:
+      - COMPANY_DATA_DIR=/data/company_data
+      - GENERATED_DIR=/data/generated
+      - CHROMA_DIR=/data/chroma_db
+      - SQLITE_PATH=/data/chat_history.db
+      - CORS_ORIGINS=http://localhost:3000,http://127.0.0.1:3000
+    volumes:
+      - ./company_data:/data/company_data
+      - ./generated:/data/generated
+      - chroma_data:/data/chroma_db
+      - sqlite_data:/data
+    ports:
+      - "8000:8000"
+    restart: unless-stopped
+
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+    container_name: brain-frontend
+    environment:
+      - NEXT_PUBLIC_API_URL=http://localhost:8000
+    depends_on:
+      - backend
+    ports:
+      - "3000:3000"
+    restart: unless-stopped
+
+volumes:
+  chroma_data:
+  sqlite_data:

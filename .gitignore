@@ -1,0 +1,53 @@
+# ── Secrets ────────────────────────────────────────────────────────────
+.env
+.env.local
+.env.*.local
+
+# ── Python ─────────────────────────────────────────────────────────────
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.venv/
+venv/
+*.egg-info/
+.pytest_cache/
+
+# ── Node / Next.js ─────────────────────────────────────────────────────
+node_modules/
+.next/
+out/
+.turbo/
+.vercel/
+*.tsbuildinfo
+
+# ── App data (PII + runtime artefacts) ────────────────────────────────
+# Real employee files belong to the user, not the repo.
+company_data/**
+!company_data/.gitkeep
+# Generated warning letters carry real names.
+generated/warnings/**
+!generated/warnings/.gitkeep
+# Vector store + chat history are local.
+backend/chroma_db/
+backend/chat_history.db
+backend/logs/
+
+# ── Logs ──────────────────────────────────────────────────────────────
+*.log
+server.log
+dev.log
+npm-*.log
+install.log
+
+# ── OS ────────────────────────────────────────────────────────────────
+.DS_Store
+Thumbs.db
+.AppleDouble
+.LSOverride
+
+# ── Editors ───────────────────────────────────────────────────────────
+.vscode/
+.idea/
+*.swp
+*.swo
