@@ -1,101 +1,93 @@
-# Deploying
+# Deployment Guide
 
-The app is split in two:
+This project has **two halves** that deploy to **two different services**:
 
-- **Frontend** — Next.js 15 (Vercel-friendly, deploys in seconds)
-- **Backend** — FastAPI + ChromaDB + sentence-transformers + SQLite (needs a real server with persistent disk; Vercel can't host it)
+| Half | What it does | Host |
+|---|---|---|
+| `frontend/` | Next.js UI (chat, files, generated docs, sidebar, settings) | **Vercel** |
+| `backend/`  | FastAPI + ChromaDB + sentence-transformers + SQLite | **Railway** or **Render** |
 
-## 1. Frontend → Vercel
+The frontend needs to know the backend's public URL via the `NEXT_PUBLIC_API_URL` env var. The backend needs the LLM API keys + the frontend's domain allowed in CORS.
 
-1. Push this repo to GitHub (already done if you're reading this).
-2. Go to <https://vercel.com/new> and **Import Git Repository**.
-3. In **Configure Project**:
-   - **Root Directory**: `frontend`
-   - Framework: Next.js (auto-detected)
-   - Build Command: leave default (`next build`)
-   - Output Directory: leave default (`.next`)
-4. **Environment Variables** — add:
+---
 
-   | Name | Value | Scope |
-   |---|---|---|
-   | `NEXT_PUBLIC_API_URL` | `https://your-backend.example.com` | Production, Preview, Development |
+## 1 · Backend on Railway (recommended — 5 minutes)
 
-5. Deploy. The frontend will build but every chat / file / generated call will fail until the backend URL is real.
+1. **Create the project** — sign in at <https://railway.com>, click **+ New Project → Deploy from GitHub repo**, pick `aalwaily/brainco`.
+2. Railway auto-detects `railway.json` in the repo root and builds from `backend/Dockerfile`.
+3. After the first build succeeds, go to **Variables** and add:
 
-## 2. Backend → pick one host
+   | Variable | Value |
+   |---|---|
+   | `DEEPSEEK_API_KEY` | `sk-...` from <https://platform.deepseek.com/api_keys> |
+   | `GEMINI_API_KEY`   | `AIza...` from <https://aistudio.google.com/app/apikey> |
+   | `LLM_PROVIDER`     | `deepseek` |
+   | `GEMINI_MODEL`     | `gemini-2.0-flash` |
+   | `CORS_ORIGINS`     | `https://<your-app>.vercel.app` (your Vercel domain) |
 
-The backend can't run on Vercel because it needs:
-- Long-running process (ChromaDB persistent client)
-- Persistent disk (vector DB, SQLite, uploaded files)
-- ~300 MB+ memory (sentence-transformers model)
+4. Go to **Settings → Networking → Generate Domain**. You'll get something like `https://brainco-backend-production.up.railway.app`.
+5. Test it: open `https://<that-domain>/health` in your browser — should return `{"ok": true, ...}`.
 
-Options ranked by ease:
+---
 
-### A. Railway (recommended)
+## 2 · Backend on Render (alternative)
 
-1. <https://railway.app/new> → **Deploy from GitHub repo** → pick this repo.
-2. Service settings:
-   - **Root Directory**: `backend`
-   - **Build Command**: `pip install -r requirements.txt`
-   - **Start Command**: `uvicorn app.main:app --host 0.0.0.0 --port $PORT`
-3. **Variables** tab — set:
-   ```
-   DEEPSEEK_API_KEY=sk-...
-   GEMINI_API_KEY=AIza...
-   LLM_PROVIDER=deepseek
-   GEMINI_MODEL=gemini-2.0-flash
-   COMPANY_DATA_DIR=/data/company_data
-   GENERATED_DIR=/data/generated
-   CHROMA_DIR=/data/chroma_db
-   SQLITE_PATH=/data/chat_history.db
-   CORS_ORIGINS=https://your-vercel-app.vercel.app
-   ```
-4. **Volumes** tab — attach a 5 GB volume mounted at `/data`.
-5. After deploy, copy the Railway public URL and paste it into Vercel's `NEXT_PUBLIC_API_URL`.
+1. Click <https://render.com/deploy?repo=https://github.com/aalwaily/brainco>.
+2. Render reads `render.yaml` and provisions the service + a 1 GB persistent disk.
+3. Add the same secret env vars (`DEEPSEEK_API_KEY`, `GEMINI_API_KEY`, `CORS_ORIGINS`) in the Render dashboard.
+4. After deploy, your URL will be `https://brainco-backend.onrender.com`.
 
-### B. Render / Fly.io / Hetzner / your own VPS
+---
 
-Same idea: install Python deps, set env vars, attach a persistent volume, expose port 8000, set CORS to your Vercel URL.
+## 3 · Frontend on Vercel
 
-### C. Just run it locally and tunnel
+1. **Connect the repo** — sign in at <https://vercel.com>, **Add New… → Project**, pick `aalwaily/brainco`.
+2. **IMPORTANT: set Root Directory to `frontend/`** (Vercel's settings, before first deploy).
+3. **Framework Preset**: Next.js (auto-detected).
+4. Add environment variables (Production + Preview):
 
-For a quick demo without a backend host, run the backend locally:
+   | Variable | Value |
+   |---|---|
+   | `NEXT_PUBLIC_API_URL` | your backend URL from step 1 or 2 (no trailing slash) |
 
-```bash
-cd backend
-source .venv/bin/activate
-python run.py
-```
+5. Click **Deploy**.
 
-Then expose it with [Cloudflare Tunnel](https://developers.cloudflare.com/cloudflare-one/connections/connect-networks/) or ngrok:
+### Disable Deployment Protection (so the public URL works)
 
-```bash
-cloudflared tunnel --url http://localhost:8000
-```
+By default Vercel puts Preview deployments behind authentication. To make your app reachable without logging in:
 
-Use the tunnel URL as `NEXT_PUBLIC_API_URL` in Vercel.
+- Vercel dashboard → your project → **Settings → Deployment Protection**
+- Set **Vercel Authentication** to **Disabled** (or scope it to Preview only)
+- Click **Save**
 
-## 3. After both are deployed
+---
 
-- Upload your files via **Upload Company files** page (or rsync them onto the backend volume at `/data/company_data/...`).
-- Hit the **Settings → Re-index company files** button (or `POST /ingest`) so ChromaDB indexes them.
-- Open the chat and ask away.
+## 4 · After both are up
 
-## 4. CORS gotcha
+- **Test it** — open your Vercel URL, ask anything. The chat should stream.
+- **Switch provider** — in the app: **Local instance → Settings → AI model → Provider** (DeepSeek / Gemini).
+- **Upload company files** — go to **Files** tab and drop documents; they'll be auto-classified into HR / Accounts / Operations & Project and indexed for retrieval.
 
-The backend's `CORS_ORIGINS` env var must include your Vercel frontend's exact URL (no trailing slash). Example:
+---
+
+## 5 · Updating CORS after Vercel URL changes
+
+Vercel preview deployments use different subdomains. To allow them all in CORS, set:
 
 ```
-CORS_ORIGINS=https://brainco.vercel.app,https://brainco-git-main-aalwaily.vercel.app
+CORS_ORIGINS=https://<your-app>.vercel.app,https://<your-app>-*.vercel.app,http://localhost:3000
 ```
 
-For preview deployments, Vercel generates per-PR URLs — easiest workaround is to set `CORS_ORIGINS=*` while testing, then tighten once you've picked a final domain.
+Or, if you have a custom domain, just put that.
 
-## 5. Things NOT in the repo (by design)
+---
 
-These are `.gitignore`d so you have to provide them per-deploy:
-- `backend/.env` (API keys)
-- `company_data/**` (your real PII)
-- `generated/warnings/**` (generated letters)
-- `backend/chroma_db/`, `backend/chat_history.db` (regenerated on the host)
-- `node_modules`, `.venv`, `.next`, logs
+## Troubleshooting
+
+**`Failed to fetch`** in browser console → backend URL is wrong, or CORS is blocking. Verify:
+- `NEXT_PUBLIC_API_URL` in Vercel matches the backend's public URL exactly.
+- `CORS_ORIGINS` in Railway/Render includes the Vercel domain.
+
+**Backend cold-start is slow (first call after idle)** → Render free tier sleeps after 15 min of inactivity. Upgrade or keep it warm with a cron-ping.
+
+**Gemini 429 rate-limit** → Free tier is small. The app automatically falls back to DeepSeek when this happens; you'll see `provider: deepseek` in the response. Switch model in Settings or upgrade your plan.

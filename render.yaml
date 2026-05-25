@@ -1,0 +1,36 @@
+# Render Blueprint — one-click backend deploy.
+# After connecting this repo at https://render.com/deploy, set the secret
+# env vars (DEEPSEEK_API_KEY, GEMINI_API_KEY, CORS_ORIGINS) in the dashboard.
+services:
+  - type: web
+    name: brainco-backend
+    runtime: docker
+    dockerfilePath: backend/Dockerfile
+    dockerContext: backend
+    plan: starter            # change to "free" if you want the free tier
+    region: frankfurt        # change to your nearest region
+    healthCheckPath: /health
+    autoDeploy: true
+    disk:
+      name: brainco-storage  # persists chroma_db + sqlite across deploys
+      mountPath: /app/data
+      sizeGB: 1
+    envVars:
+      - key: PORT
+        value: 8000
+      - key: PYTHONUNBUFFERED
+        value: "1"
+      - key: LLM_PROVIDER
+        value: deepseek
+      - key: GEMINI_MODEL
+        value: gemini-2.0-flash
+      - key: CHROMA_DIR
+        value: /app/data/chroma_db
+      - key: SQLITE_PATH
+        value: /app/data/chat_history.db
+      - key: DEEPSEEK_API_KEY
+        sync: false          # add via the Render dashboard
+      - key: GEMINI_API_KEY
+        sync: false          # add via the Render dashboard
+      - key: CORS_ORIGINS
+        sync: false          # set to https://your-app.vercel.app
