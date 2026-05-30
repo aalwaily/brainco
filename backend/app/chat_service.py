@@ -251,10 +251,19 @@ DOC_SPEC_SYSTEM = (
     "Rules:\n"
     "- Write real, complete, professional content — never placeholders like {{NAME}}.\n"
     "- If the user gave employee/company data, USE it (names, iqama, dates, amounts).\n"
-    "- Reply in the user's language (Arabic stays Arabic).\n"
+    "- LANGUAGE: write the document in EXACTLY the language specified in the\n"
+    "  'Target language' line of the user turn. Title, body, table headers,\n"
+    "  filename — ALL must be in that language. Do NOT mix languages unless\n"
+    "  asked. (Saudi proper names like 'Ahmed' can stay transliterated.)\n"
     "- For spreadsheets/tables prefer type xlsx with a table.\n"
     "- Output ONLY the JSON. No explanation, no code fence."
 )
+
+
+_LANG_LABEL = {
+    "ar": "Arabic (العربية) — write everything in Arabic.",
+    "en": "English — write everything in English.",
+}
 
 
 async def _generate_doc_spec(
@@ -262,16 +271,22 @@ async def _generate_doc_spec(
     provider,
     fmt: Optional[str],
     prev_spec: Optional[Dict],
+    language: str = "en",
 ) -> Dict:
     """Ask the LLM to produce a document spec, then normalize it."""
     context = _gather_context(message)
-    parts = [f"User request:\n{message}"]
+    lang_line = _LANG_LABEL.get(language, _LANG_LABEL["en"])
+    parts = [
+        f"Target language: {lang_line}",
+        f"\nUser request:\n{message}",
+    ]
     if context and context != "(no context retrieved)":
         parts.append(f"\nCompany data you may use:\n{context}")
     if prev_spec:
         parts.append(
             "\nThis is the previous document the user wants to EDIT. Apply their "
-            "requested change and return the FULL updated document:\n"
+            "requested change and return the FULL updated document (still in the "
+            "target language above):\n"
             + _json.dumps(prev_spec, ensure_ascii=False)
         )
     if fmt:
@@ -302,16 +317,22 @@ async def _handle_document(message, provider, intent, session_id):
     """Build a document and return (assistant_text, filename). Raises on failure."""
     prev = _LAST_DOC_SPEC.get(session_id) if (session_id and intent.get("is_edit")) else None
     fmt = intent.get("fmt") or (prev or {}).get("type")
-    spec = await _generate_doc_spec(message, provider, fmt, prev)
+    language = intent.get("language") or "en"
+    spec = await _generate_doc_spec(message, provider, fmt, prev, language)
     meta = build_document(spec, group="Documents")
     if session_id:
         _LAST_DOC_SPEC[session_id] = spec
-    verb = "Updated" if intent.get("is_edit") else "Created"
-    text = (
-        f"{verb} **{meta['filename']}** ({meta['type'].upper()}). "
-        f"You can download it below"
-        + (" — or tell me what to change." if not intent.get("is_edit") else ".")
-    )
+    # Confirmation message also matches the target language so the chat reply
+    # feels native (an Arabic-asked doc gets an Arabic confirmation).
+    is_edit = intent.get("is_edit")
+    if language == "ar":
+        verb = "تم تحديث" if is_edit else "تم إنشاء"
+        suffix = "" if is_edit else " — أو أخبرني بأي تعديل تريده."
+        text = f"{verb} **{meta['filename']}** ({meta['type'].upper()}). يمكنك تحميله بالأسفل{suffix}"
+    else:
+        verb = "Updated" if is_edit else "Created"
+        suffix = "" if is_edit else " — or tell me what to change."
+        text = f"{verb} **{meta['filename']}** ({meta['type'].upper()}). You can download it below.{suffix}"
     return text, meta["filename"]
 
 
