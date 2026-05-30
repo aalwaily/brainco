@@ -28,6 +28,8 @@ company_data/**
 # Generated warning letters carry real names.
 generated/warnings/**
 !generated/warnings/.gitkeep
+generated/Documents/**
+generated/Archive/**
 # Vector store + chat history are local.
 backend/chroma_db/
 backend/chat_history.db
