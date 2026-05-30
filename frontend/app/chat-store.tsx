@@ -49,6 +49,8 @@ export type Msg = {
   content: string;
   sources?: Source[];
   generated_file?: string | null;
+  /** Names of files attached to (and sent with) this user message. */
+  attachments?: string[];
   error?: boolean;
   streaming?: boolean;
 };
@@ -56,7 +58,7 @@ export type Msg = {
 type ChatState = {
   messages: Msg[];
   busy: boolean;
-  send: (message: string) => Promise<void>;
+  send: (message: string, attachments?: string[]) => Promise<void>;
   stop: () => void;
   newChat: () => void;
   loadSession: (id: number) => Promise<void>;
@@ -160,14 +162,27 @@ export function ChatProvider({ children }: { children: ReactNode }) {
     buffersRef.current.clear();
   }, []);
 
-  const send = useCallback(async (message: string) => {
+  const send = useCallback(async (message: string, attachments?: string[]) => {
     const m = message.trim();
-    if (!m || busy) return;
+    // Allow sending with attachments even if the text is empty.
+    if ((!m && !(attachments && attachments.length)) || busy) return;
     setBusy(true);
     const assistantId = uid();
+    // If there's no typed text, synthesize a prompt so the model knows the
+    // user just wants the attached file(s) understood.
+    const userContent = m || (
+      attachments && attachments.length === 1
+        ? `Please read the attached file: ${attachments[0]}`
+        : `Please read the attached files: ${(attachments || []).join(', ')}`
+    );
+    // What we actually send to the model: prepend a note about the attachments
+    // so retrieval + the LLM prioritise them.
+    const modelMessage = attachments && attachments.length
+      ? `${m ? m + '\n\n' : ''}(The user attached: ${attachments.join(', ')}. Use these file(s) to answer.)`
+      : m;
     setMessages((prev) => [
       ...prev,
-      { id: uid(), role: 'user', content: m },
+      { id: uid(), role: 'user', content: userContent, attachments },
       { id: assistantId, role: 'assistant', content: '', streaming: true },
     ]);
 
@@ -185,7 +200,7 @@ export function ChatProvider({ children }: { children: ReactNode }) {
     let generatedFile: string | null = null;
     try {
       await streamChat(
-        m,
+        modelMessage,
         (ev) => {
           if (ev.type === 'session') {
             // Server may have assigned a new id (first message) — capture it.

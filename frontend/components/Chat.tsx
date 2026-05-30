@@ -2,21 +2,28 @@
 
 import { FormEvent, memo, useCallback, useEffect, useRef, useState } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
-import { ArrowUp, Download, Sparkles, Square } from 'lucide-react';
+import {
+  ArrowUp, Check, Download, FileText, Loader2, Paperclip, Plus, Sparkles, Square, X,
+} from 'lucide-react';
+import { toast } from 'sonner';
 import { cn } from '@/lib/cn';
 import { useLang } from '@/app/providers';
 import { useChat, type Msg } from '@/app/chat-store';
 import { t } from '@/lib/i18n';
+import { uploadFiles } from '@/lib/api';
 import { Button } from '@/components/ui/button';
 import { MarkdownRenderer } from '@/components/chat/MarkdownRenderer';
 import { MessageActions, UserMessageActions } from '@/components/chat/MessageActions';
 import { ThinkingRenderer } from '@/components/chat/ThinkingRenderer';
+import { VoiceButton } from '@/components/chat/VoiceButton';
 import { detectDirection } from '@/lib/i18n/direction';
 
 export function Chat() {
   const { lang } = useLang();
   const { messages, busy, send, stop } = useChat();
   const [input, setInput] = useState('');
+  // Attachments staged in the composer; sent with the next message, then cleared.
+  const [attachments, setAttachments] = useState<AttachedFile[]>([]);
   const scrollElRef = useRef<HTMLDivElement | null>(null);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   // "Stay glued to bottom" intent — flipped off when the user scrolls up,
@@ -66,12 +73,18 @@ export function Chat() {
 
   async function submit(message: string) {
     const m = message.trim();
-    if (!m || busy) return;
+    // Files still uploading? wait. Need either text or a finished attachment.
+    const ready = attachments.filter((a) => a.status === 'done');
+    const uploading = attachments.some((a) => a.status === 'uploading');
+    if (uploading) return;
+    if (!m && ready.length === 0) return;
+    if (busy) return;
+
+    const names = ready.map((a) => a.name);
     setInput('');
-    // Always glue back to bottom on a new send — user just submitted, they
-    // want to see their prompt + the incoming reply.
+    setAttachments([]);
     stickyRef.current = true;
-    await send(m);
+    await send(m, names.length ? names : undefined);
     requestAnimationFrame(() => {
       const el = scrollElRef.current;
       if (el && stickyRef.current) {
@@ -103,6 +116,8 @@ export function Chat() {
       onKey={onTextareaKey}
       lang={lang}
       textareaRef={textareaRef}
+      attachments={attachments}
+      setAttachments={setAttachments}
     />
   );
 
@@ -110,7 +125,7 @@ export function Chat() {
   if (messages.length === 0) {
     return (
       <div className="flex h-[100dvh] flex-1 flex-col">
-        <div className="flex flex-1 items-center justify-center px-4 sm:px-6">
+        <div className="flex flex-1 flex-col items-center justify-center px-4 pb-[12vh] sm:px-6">
           <motion.div
             initial={{ opacity: 0, y: 8 }}
             animate={{ opacity: 1, y: 0 }}
@@ -169,8 +184,16 @@ export function Chat() {
 
 // --- Composer ---------------------------------------------------------------
 
+type AttachedFile = {
+  id: string;
+  name: string;
+  status: 'uploading' | 'done' | 'error';
+  category?: string;
+};
+
 function Composer({
   input, setInput, busy, stop, onSubmit, onKey, lang, textareaRef,
+  attachments, setAttachments,
 }: {
   input: string;
   setInput: (s: string) => void;
@@ -180,12 +203,16 @@ function Composer({
   onKey: (e: React.KeyboardEvent<HTMLTextAreaElement>) => void;
   lang: 'en' | 'ar';
   textareaRef: React.RefObject<HTMLTextAreaElement | null>;
+  attachments: AttachedFile[];
+  setAttachments: React.Dispatch<React.SetStateAction<AttachedFile[]>>;
 }) {
-  const MIN_H = 58;
-  const MAX_H = 280; // about 10–12 lines, then internal scroll
+  const MIN_H = 28;
+  const MAX_H = 220; // textarea grows then scrolls internally
+
+  const fileInputRef = useRef<HTMLInputElement>(null);
+  const [dragging, setDragging] = useState(false);
 
   // Auto-grow the textarea to fit content, capped at MAX_H.
-  // After the cap, native overflow-y:auto handles further scrolling.
   useEffect(() => {
     const el = textareaRef.current;
     if (!el) return;
@@ -195,56 +222,192 @@ function Composer({
     el.style.overflowY = el.scrollHeight > MAX_H ? 'auto' : 'hidden';
   }, [input, textareaRef]);
 
-  // Match the form's logical direction to the input content so `pe-14`
-  // (textarea padding-end) AND `end-2.5` (button position) both resolve to
-  // the same side — the end of the user's text. Without this, an LTR form
-  // keeps the button on the right while Arabic text flows in from the right,
-  // and the button overlaps the first word.
+  // Upload picked / dropped files to the knowledge base, then re-index.
+  const handleFiles = useCallback(async (list: FileList | null) => {
+    if (!list || list.length === 0) return;
+    const files = Array.from(list);
+    const pending: AttachedFile[] = files.map((f) => ({
+      id: Math.random().toString(36).slice(2),
+      name: f.name,
+      status: 'uploading',
+    }));
+    setAttachments((prev) => [...prev, ...pending]);
+    try {
+      const res = await uploadFiles(files);
+      const byName = new Map(
+        (res?.uploaded ?? []).map((u) => [u.name, u.category]),
+      );
+      setAttachments((prev) =>
+        prev.map((a) =>
+          pending.find((p) => p.id === a.id)
+            ? { ...a, status: 'done', category: byName.get(a.name) }
+            : a,
+        ),
+      );
+      const n = files.length;
+      toast.success(`Uploaded ${n} file${n === 1 ? '' : 's'}`, {
+        description: 'Indexed — you can now ask about them.',
+      });
+    } catch (e: unknown) {
+      setAttachments((prev) =>
+        prev.map((a) =>
+          pending.find((p) => p.id === a.id) ? { ...a, status: 'error' } : a,
+        ),
+      );
+      toast.error('Upload failed', { description: e instanceof Error ? e.message : String(e) });
+    }
+  }, []);
+
+  function onPick(e: React.ChangeEvent<HTMLInputElement>) {
+    void handleFiles(e.target.files);
+    if (fileInputRef.current) fileInputRef.current.value = '';
+  }
+
+  function onDrop(e: React.DragEvent) {
+    e.preventDefault();
+    setDragging(false);
+    void handleFiles(e.dataTransfer.files);
+  }
+
+  // Match the form's logical direction to the input content.
   const formDir = input ? detectDirection(input) : 'ltr';
 
   return (
-    <form onSubmit={onSubmit} className="relative" dir={formDir}>
-      <textarea
-        ref={textareaRef}
-        value={input}
-        rows={1}
-        onChange={(e) => setInput(e.target.value)}
-        onKeyDown={onKey}
-        dir="auto"
-        placeholder={t(lang, 'chat_placeholder')}
-        disabled={busy}
-        style={{ minHeight: MIN_H, maxHeight: MAX_H }}
-        className={cn(
-          'scrollbar-thin block w-full resize-none rounded-3xl border border-border bg-card px-5 py-4 pe-14 text-[15px] leading-6 shadow-elev',
-          'placeholder:text-muted-foreground/70',
-          'transition-[border-color,box-shadow] duration-150',
-          'focus-visible:border-ring/60 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring/30',
-          'disabled:opacity-60',
-        )}
+    <form
+      onSubmit={onSubmit}
+      dir={formDir}
+      onDragOver={(e) => { e.preventDefault(); setDragging(true); }}
+      onDragLeave={() => setDragging(false)}
+      onDrop={onDrop}
+    >
+      <input
+        ref={fileInputRef}
+        type="file"
+        multiple
+        accept=".pdf,.docx,.xlsx,.xls,.csv,.txt"
+        onChange={onPick}
+        className="hidden"
       />
-      {busy ? (
-        <Button
-          type="button"
-          size="icon"
-          variant="secondary"
-          onClick={stop}
-          aria-label="Stop"
-          className="absolute bottom-2.5 end-2.5 h-9 w-9 rounded-full border border-border"
-        >
-          <Square className="h-3.5 w-3.5 fill-current" />
-        </Button>
-      ) : (
-        <Button
-          type="submit"
-          size="icon"
-          disabled={!input.trim()}
-          aria-label={t(lang, 'chat_send')}
-          className="absolute bottom-2.5 end-2.5 h-9 w-9 rounded-full shadow-glow"
-        >
-          <ArrowUp className="h-4 w-4" />
-        </Button>
-      )}
+
+      <div
+        className={cn(
+          'flex flex-col gap-1 rounded-3xl border bg-card px-2 pb-2 pt-1 shadow-elev transition-[border-color,box-shadow] duration-150',
+          'focus-within:border-ring/60 focus-within:ring-2 focus-within:ring-ring/30',
+          dragging ? 'border-primary ring-2 ring-primary/30' : 'border-border',
+        )}
+      >
+        {attachments.length > 0 && (
+          <div className="flex flex-wrap gap-1.5 px-2 pt-2">
+            {attachments.map((a) => (
+              <AttachmentChip
+                key={a.id}
+                file={a}
+                onRemove={() => setAttachments((prev) => prev.filter((x) => x.id !== a.id))}
+              />
+            ))}
+          </div>
+        )}
+
+        <textarea
+          ref={textareaRef}
+          value={input}
+          rows={1}
+          onChange={(e) => setInput(e.target.value)}
+          onKeyDown={onKey}
+          dir="auto"
+          placeholder={t(lang, 'chat_placeholder')}
+          disabled={busy}
+          style={{ minHeight: MIN_H, maxHeight: MAX_H }}
+          className={cn(
+            'scrollbar-thin block w-full resize-none bg-transparent px-3 pt-3 pb-1 text-[15px] leading-6',
+            'placeholder:text-muted-foreground/70 focus:outline-none disabled:opacity-60',
+          )}
+        />
+
+        <div className="flex items-center justify-between px-1">
+          <button
+            type="button"
+            onClick={() => fileInputRef.current?.click()}
+            aria-label="Attach files"
+            title="Attach company files"
+            className={cn(
+              'grid h-9 w-9 place-items-center rounded-full text-muted-foreground transition-colors',
+              'hover:bg-accent hover:text-foreground',
+              'focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring/40',
+            )}
+          >
+            <Plus className="h-5 w-5" />
+          </button>
+
+          <div className="flex items-center gap-1">
+            <VoiceButton
+              lang={lang}
+              disabled={busy}
+              getBaseText={() => input}
+              onText={(text) => setInput(text)}
+            />
+            {busy ? (
+              <Button
+                type="button"
+                size="icon"
+                variant="secondary"
+                onClick={stop}
+                aria-label="Stop"
+                className="h-9 w-9 rounded-full border border-border"
+              >
+                <Square className="h-3.5 w-3.5 fill-current" />
+              </Button>
+            ) : (
+              <Button
+                type="submit"
+                size="icon"
+                disabled={!input.trim() && !attachments.some((a) => a.status === 'done')}
+                aria-label={t(lang, 'chat_send')}
+                style={{ backgroundColor: '#FFFFF0', color: '#111827' }}
+                className="h-9 w-9 rounded-full border border-border shadow-soft hover:brightness-95"
+              >
+                <ArrowUp className="h-4 w-4" />
+              </Button>
+            )}
+          </div>
+        </div>
+      </div>
     </form>
+  );
+}
+
+function AttachmentChip({ file, onRemove }: { file: AttachedFile; onRemove: () => void }) {
+  return (
+    <div
+      className={cn(
+        'group/chip flex max-w-[220px] items-center gap-2 rounded-lg border bg-background px-2 py-1.5 text-xs',
+        file.status === 'error' ? 'border-destructive/40' : 'border-border',
+      )}
+    >
+      <div className="grid h-6 w-6 shrink-0 place-items-center rounded-md bg-primary/10 text-primary">
+        {file.status === 'uploading'
+          ? <Loader2 className="h-3 w-3 animate-spin" />
+          : file.status === 'done'
+            ? <FileText className="h-3 w-3" />
+            : <X className="h-3 w-3 text-destructive" />}
+      </div>
+      <div className="min-w-0 flex-1">
+        <div className="truncate font-medium text-foreground" title={file.name}>{file.name}</div>
+        <div className="truncate text-[10px] text-muted-foreground">
+          {file.status === 'uploading' ? 'Uploading…'
+            : file.status === 'error' ? 'Failed'
+            : file.category ? `Indexed · ${file.category}` : 'Indexed'}
+        </div>
+      </div>
+      <button
+        type="button"
+        onClick={onRemove}
+        aria-label="Remove"
+        className="grid h-5 w-5 shrink-0 place-items-center rounded text-muted-foreground opacity-0 transition-opacity hover:text-foreground group-hover/chip:opacity-100"
+      >
+        <X className="h-3 w-3" />
+      </button>
+    </div>
   );
 }
 
@@ -264,8 +427,8 @@ function Greeting() {
   // Until we know the hour, show the neutral title to avoid a hydration flicker.
   const text = t(lang, key as 'chat_welcome_title');
   return (
-    <h1 className="bg-gradient-to-b from-foreground to-foreground/70 bg-clip-text text-4xl font-semibold tracking-tight text-transparent sm:text-5xl">
-      <Sparkles className="me-2 inline-block h-7 w-7 -translate-y-1 text-primary" />
+    <h1 className="bg-gradient-to-b from-foreground to-foreground/70 bg-clip-text text-3xl font-semibold tracking-tight text-transparent sm:text-4xl">
+      <Sparkles className="me-2 inline-block h-6 w-6 -translate-y-0.5 text-primary" />
       {text}
     </h1>
   );
@@ -333,6 +496,19 @@ const Bubble = memo(function Bubble({ msg }: { msg: Msg }) {
       className={cn('group/msg flex w-full', isUser ? 'justify-end' : 'justify-start')}
     >
       <div className={cn('flex flex-col gap-1.5', isUser ? 'max-w-[70%] items-end' : 'w-full items-start')}>
+        {isUser && msg.attachments && msg.attachments.length > 0 && (
+          <div className="flex flex-wrap justify-end gap-1.5">
+            {msg.attachments.map((name) => (
+              <div
+                key={name}
+                className="flex items-center gap-2 rounded-lg border border-border bg-card px-2.5 py-1.5 text-xs shadow-soft"
+              >
+                <FileText className="h-3.5 w-3.5 shrink-0 text-primary" />
+                <span className="max-w-[180px] truncate font-medium" title={name}>{name}</span>
+              </div>
+            ))}
+          </div>
+        )}
         <div
           dir="auto"
           className={cn(
