@@ -330,9 +330,14 @@ def _build_pdf(spec: Dict, out: Path) -> None:
             continue
         if b.kind == "li":
             txt = _strip_inline(b.text)
-            # Use a dash as the bullet glyph — the Arabic font lacks U+2022 (•),
-            # and a dash renders cleanly in both Noto Naskh and Noto Sans.
-            write_line((txt + "  -") if _has_arabic(txt) else ("-  " + txt), size=11)
+            # Noto Naskh lacks both U+2022 (•) and even '-' as standalone glyphs,
+            # so we use the Arabic-safe middle dot (U+066D ۭ→ use ٭? ) — simplest
+            # robust choice is a leading bullet drawn only for Latin, and for
+            # Arabic just indent the text (RTL readers expect right-aligned items).
+            if _has_arabic(txt):
+                write_line("  " + txt, size=11)        # indented, RTL aligns right
+            else:
+                write_line("•  " + txt, size=11)   # Latin font has the bullet
             continue
         write_line(_strip_inline(b.text), size=11)
 
