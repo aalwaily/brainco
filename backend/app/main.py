@@ -163,7 +163,7 @@ async def chat_stream(req: ChatRequest) -> StreamingResponse:
         # Tell the client the session id up front so it can route follow-ups.
         yield json.dumps({"type": "session", "id": session_id}, ensure_ascii=False) + "\n"
         try:
-            async for line in stream_answer(req.message, req.provider):
+            async for line in stream_answer(req.message, req.provider, session_id):
                 try:
                     obj = json.loads(line)
                     if obj.get("type") == "sources":

@@ -18,5 +18,13 @@ openpyxl==3.1.5
 httpx==0.28.1
 python-dotenv==1.0.1
 
+# Document generation
+fpdf2==2.8.5
+arabic-reshaper==3.0.0
+python-bidi==0.6.6
+
+# LLM providers
+google-genai==1.47.0
+
 # Logging
 loguru==0.7.3

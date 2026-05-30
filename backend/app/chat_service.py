@@ -3,11 +3,18 @@ from __future__ import annotations
 from typing import AsyncIterator, Dict, List, Optional
 
 from .config import settings
+from .doc_builder import build_document
+from .doc_intent import detect_document_intent, infer_format
 from .employee_lookup import resolve as resolve_employees
 from .logger import logger
 from .providers import get_provider, list_providers, LLMError
 from .vectorstore import keyword_search, query
 from .warnings import detect_warning_intent, generate_warning
+
+# In-memory cache of the last document spec built per session, so follow-up
+# edit requests ("change the date") can build on the previous content.
+# Lost on restart — acceptable for an editing convenience.
+_LAST_DOC_SPEC: Dict[int, Dict] = {}
 
 SYSTEM_PROMPT = (
     "You are 'AI Company Brain', an internal assistant for a Saudi company.\n"
@@ -177,7 +184,161 @@ def _ev(obj: Dict) -> str:
     return _json.dumps(obj, ensure_ascii=False) + "\n"
 
 
-async def stream_answer(message: str, provider_name: Optional[str] = None) -> AsyncIterator[str]:
+# ---- Document generation helpers -------------------------------------------
+
+def _gather_context(message: str) -> str:
+    """Retrieve company-file context (exact lookup + vector + keyword) and
+    format it for an LLM prompt. Shared by chat and document generation."""
+    exact = resolve_employees(message)
+    rag_chunks = query(message)
+    kw_chunks = keyword_search(message, settings.KEYWORD_TOP_K)
+    seen: set = set()
+    chunks: List[Dict] = []
+    for c in exact + rag_chunks + kw_chunks:
+        m = c.get("metadata", {}) or {}
+        key = (m.get("source"), m.get("row"), m.get("page"), m.get("sheet"))
+        if key in seen:
+            continue
+        seen.add(key)
+        chunks.append(c)
+    return _format_context(chunks)
+
+
+def _extract_json(text: str) -> Optional[Dict]:
+    """Pull the first JSON object out of an LLM reply (handles ```json fences
+    and stray prose around it)."""
+    if not text:
+        return None
+    fence = _json.loads if False else None  # noqa (keep mypy quiet)
+    # Strip code fences
+    cleaned = text.strip()
+    cleaned = _re_sub_fence(cleaned)
+    # Find the outermost {...}
+    start = cleaned.find("{")
+    end = cleaned.rfind("}")
+    if start == -1 or end == -1 or end <= start:
+        return None
+    blob = cleaned[start : end + 1]
+    try:
+        return _json.loads(blob)
+    except Exception:
+        # last resort: try trimming trailing commas
+        try:
+            import re as _re
+            blob2 = _re.sub(r",\s*([}\]])", r"\1", blob)
+            return _json.loads(blob2)
+        except Exception:
+            return None
+
+
+def _re_sub_fence(text: str) -> str:
+    import re as _re
+    return _re.sub(r"```[a-zA-Z0-9]*\n?|```", "", text)
+
+
+DOC_SPEC_SYSTEM = (
+    "You are a document generation engine for a Saudi company assistant.\n"
+    "Given a user request (and optional company data + a previous document to "
+    "edit), output a SINGLE JSON object describing the document to build.\n\n"
+    "Schema:\n"
+    "{\n"
+    '  "type": "pdf|docx|xlsx|md|txt",\n'
+    '  "filename": "short_snake_or_arabic_name_without_extension",\n'
+    '  "title": "Document title",\n'
+    '  "body": "Markdown content: use #/##/### headings, - bullets, 1. numbers, **bold**, blank lines between paragraphs",\n'
+    '  "table": { "columns": ["A","B"], "rows": [["x","y"]] }   // OPTIONAL, omit if not tabular\n'
+    "}\n\n"
+    "Rules:\n"
+    "- Write real, complete, professional content — never placeholders like {{NAME}}.\n"
+    "- If the user gave employee/company data, USE it (names, iqama, dates, amounts).\n"
+    "- Reply in the user's language (Arabic stays Arabic).\n"
+    "- For spreadsheets/tables prefer type xlsx with a table.\n"
+    "- Output ONLY the JSON. No explanation, no code fence."
+)
+
+
+async def _generate_doc_spec(
+    message: str,
+    provider,
+    fmt: Optional[str],
+    prev_spec: Optional[Dict],
+) -> Dict:
+    """Ask the LLM to produce a document spec, then normalize it."""
+    context = _gather_context(message)
+    parts = [f"User request:\n{message}"]
+    if context and context != "(no context retrieved)":
+        parts.append(f"\nCompany data you may use:\n{context}")
+    if prev_spec:
+        parts.append(
+            "\nThis is the previous document the user wants to EDIT. Apply their "
+            "requested change and return the FULL updated document:\n"
+            + _json.dumps(prev_spec, ensure_ascii=False)
+        )
+    if fmt:
+        parts.append(f"\nThe document MUST be of type: {fmt}")
+    user_prompt = "\n".join(parts)
+
+    reply = await provider.chat(
+        [
+            {"role": "system", "content": DOC_SPEC_SYSTEM},
+            {"role": "user", "content": user_prompt},
+        ],
+        temperature=0.3,
+    )
+    spec = _extract_json(reply) or {}
+    # Normalize / fill defaults
+    if fmt:
+        spec["type"] = fmt
+    spec.setdefault("type", "pdf")
+    if prev_spec and not spec.get("type"):
+        spec["type"] = prev_spec.get("type", "pdf")
+    spec.setdefault("title", "Document")
+    spec.setdefault("filename", spec.get("title") or "document")
+    spec.setdefault("body", "")
+    return spec
+
+
+async def _handle_document(message, provider, intent, session_id):
+    """Build a document and return (assistant_text, filename). Raises on failure."""
+    prev = _LAST_DOC_SPEC.get(session_id) if (session_id and intent.get("is_edit")) else None
+    fmt = intent.get("fmt") or (prev or {}).get("type")
+    spec = await _generate_doc_spec(message, provider, fmt, prev)
+    meta = build_document(spec, group="Documents")
+    if session_id:
+        _LAST_DOC_SPEC[session_id] = spec
+    verb = "Updated" if intent.get("is_edit") else "Created"
+    text = (
+        f"{verb} **{meta['filename']}** ({meta['type'].upper()}). "
+        f"You can download it below"
+        + (" — or tell me what to change." if not intent.get("is_edit") else ".")
+    )
+    return text, meta["filename"]
+
+
+async def stream_answer(
+    message: str,
+    provider_name: Optional[str] = None,
+    session_id: Optional[int] = None,
+) -> AsyncIterator[str]:
+    # Tool: universal document generation (PDF / Word / Excel / Markdown).
+    doc_intent = detect_document_intent(message)
+    if doc_intent:
+        try:
+            provider = get_provider(provider_name)
+            yield _ev({"type": "provider", "id": provider.id, "label": provider.label})
+            text, filename = await _handle_document(message, provider, doc_intent, session_id)
+            yield _ev({"type": "sources", "sources": []})
+            yield _ev({"type": "token", "content": text})
+            yield _ev({"type": "done", "answer": text, "generated_file": filename})
+            return
+        except LLMError as e:
+            yield _ev({"type": "error", "message": str(e)})
+            return
+        except Exception as e:
+            logger.exception("Document generation failed")
+            yield _ev({"type": "error", "message": f"Could not build the document: {e}"})
+            return
+
     # Tool: warning generation intent — single shot, no token streaming.
     intent = detect_warning_intent(message)
     if intent:
